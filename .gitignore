@@ -1,0 +1,12 @@
+# Binaries
+claude-wrapper
+
+# Test coverage
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
