@@ -2,18 +2,24 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
+
+var version = "dev"
 
 const (
 	excludeFile      = ".git/info/exclude"
@@ -40,7 +46,160 @@ func main() {
 	}
 }
 
+var versionTagPattern = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+
+type updater struct {
+	version     string
+	apiURL      string
+	downloadURL func(tag string) string
+	client      *http.Client
+	dlClient    *http.Client
+	selfPath    func() (string, error)
+	restart     func(self string) error
+}
+
+func defaultUpdater() *updater {
+	return &updater{
+		version: version,
+		apiURL:  "https://api.github.com/repos/grumpyguvner/claude_wrapper/releases/latest",
+		downloadURL: func(tag string) string {
+			return fmt.Sprintf("https://github.com/grumpyguvner/claude_wrapper/releases/download/%s/claude-wrapper", tag)
+		},
+		client:   &http.Client{Timeout: 5 * time.Second},
+		dlClient: &http.Client{Timeout: 60 * time.Second},
+		selfPath: func() (string, error) {
+			self, err := os.Executable()
+			if err != nil {
+				return "", err
+			}
+			return filepath.EvalSymlinks(self)
+		},
+		restart: func(self string) error {
+			return syscall.Exec(self, os.Args, os.Environ())
+		},
+	}
+}
+
+// checkLatest fetches the latest release tag. Returns "" if no update is needed.
+func (u *updater) checkLatest() (string, error) {
+	if u.version == "dev" {
+		return "", nil
+	}
+
+	resp, err := u.client.Get(u.apiURL)
+	if err != nil {
+		return "", fmt.Errorf("update check failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("update check returned status %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("failed to parse release info: %w", err)
+	}
+
+	if release.TagName == "" || release.TagName == u.version {
+		return "", nil
+	}
+
+	if !versionTagPattern.MatchString(release.TagName) {
+		return "", fmt.Errorf("unexpected release tag format: %s", release.TagName)
+	}
+
+	return release.TagName, nil
+}
+
+// downloadAndReplace downloads the new binary and replaces the current executable.
+func (u *updater) downloadAndReplace(tag string) error {
+	self, err := u.selfPath()
+	if err != nil {
+		return fmt.Errorf("failed to resolve executable path: %w", err)
+	}
+
+	dlResp, err := u.dlClient.Get(u.downloadURL(tag))
+	if err != nil {
+		return fmt.Errorf("failed to download update: %w", err)
+	}
+	defer dlResp.Body.Close()
+
+	if dlResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned status %d", dlResp.StatusCode)
+	}
+
+	// Create temp file in same directory as binary to ensure atomic rename
+	tmpFile, err := os.CreateTemp(filepath.Dir(self), ".claude-wrapper-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := io.Copy(tmpFile, dlResp.Body); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to write update: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to chmod update: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, self); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to replace binary: %w", err)
+	}
+
+	return nil
+}
+
+// apply performs the full update check, download, replace, and restart cycle.
+func (u *updater) apply() {
+	if os.Getenv("CLAUDE_WRAPPER_UPDATED") == "1" {
+		return
+	}
+
+	tag, err := u.checkLatest()
+	if err != nil {
+		log.Printf("warning: %v", err)
+		return
+	}
+	if tag == "" {
+		return
+	}
+
+	log.Printf("updating claude-wrapper from %s to %s...", u.version, tag)
+
+	if err := u.downloadAndReplace(tag); err != nil {
+		log.Printf("warning: %v", err)
+		return
+	}
+
+	self, err := u.selfPath()
+	if err != nil {
+		log.Printf("warning: updated to %s but failed to resolve executable path: %v", tag, err)
+		return
+	}
+
+	os.Setenv("CLAUDE_WRAPPER_UPDATED", "1")
+	log.Printf("updated to %s, restarting...", tag)
+	if err := u.restart(self); err != nil {
+		log.Printf("warning: updated but failed to restart: %v", err)
+	}
+}
+
+func checkForUpdate() {
+	defaultUpdater().apply()
+}
+
 func run(args []string) error {
+	checkForUpdate()
+
 	cfg, err := loadConfig()
 	if err != nil {
 		// Not in a git repo, just pass through to claude

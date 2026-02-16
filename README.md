@@ -82,6 +82,12 @@ alias claude='claude-wrapper'
 
 ## How It Works
 
+### Self-update (release builds only)
+
+On startup, release builds check GitHub for a newer version. If found, the binary downloads the update, replaces itself, and restarts with the same arguments. A `CLAUDE_WRAPPER_UPDATED` environment variable prevents repeated restarts. Dev builds (`go build` without ldflags) skip this entirely.
+
+To disable auto-update, set `CLAUDE_WRAPPER_UPDATED=1` before running the wrapper.
+
 ### Sync In (before claude runs)
 
 1. Detects git repo, current branch, default branch
@@ -107,6 +113,7 @@ alias claude='claude-wrapper'
 - **Detached HEAD**: Passes through directly to claude
 - **Sync errors**: Fail with a clear message (claude does not run)
 - **Cleanup errors**: Logged as warnings, do not fail the main operation
+- **Update errors**: Logged as warnings, do not prevent normal operation
 - **Claude exit code**: Preserved and propagated to the caller
 
 ## Configuration
@@ -124,7 +131,7 @@ All automatic via git:
 make release VERSION=v0.1.0
 ```
 
-This runs tests, builds a linux/amd64 binary, tags the commit, and creates a GitHub release with the binary attached.
+This runs tests, builds a linux/amd64 binary with the version tag embedded (enabling automatic self-updates), tags the commit, and creates a GitHub release with the binary attached.
 
 ## Project Structure
 

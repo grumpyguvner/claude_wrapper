@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,5 +298,475 @@ func TestListDir(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Errorf("expected empty slice for non-existent dir, got %d items", len(items))
+	}
+}
+
+func newTestUpdater(apiServer *httptest.Server, dlServer *httptest.Server, ver string, selfPath string) *updater {
+	u := &updater{
+		version: ver,
+		client:  apiServer.Client(),
+		dlClient: func() *http.Client {
+			if dlServer != nil {
+				return dlServer.Client()
+			}
+			return apiServer.Client()
+		}(),
+		selfPath: func() (string, error) { return selfPath, nil },
+		restart:  func(self string) error { return nil },
+	}
+	u.apiURL = apiServer.URL
+	if dlServer != nil {
+		u.downloadURL = func(tag string) string { return dlServer.URL + "/" + tag }
+	} else {
+		u.downloadURL = func(tag string) string { return apiServer.URL + "/download/" + tag }
+	}
+	return u
+}
+
+func TestCheckLatest_DevVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not make HTTP request for dev version")
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "dev", "")
+	tag, err := u.checkLatest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "" {
+		t.Errorf("expected empty tag for dev version, got %q", tag)
+	}
+}
+
+func TestCheckLatest_SameVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v1.0.0"})
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	tag, err := u.checkLatest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "" {
+		t.Errorf("expected empty tag for same version, got %q", tag)
+	}
+}
+
+func TestCheckLatest_NewVersionAvailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v2.0.0"})
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	tag, err := u.checkLatest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "v2.0.0" {
+		t.Errorf("expected v2.0.0, got %q", tag)
+	}
+}
+
+func TestCheckLatest_EmptyTag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": ""})
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	tag, err := u.checkLatest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tag != "" {
+		t.Errorf("expected empty tag, got %q", tag)
+	}
+}
+
+func TestCheckLatest_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	tag, err := u.checkLatest()
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if tag != "" {
+		t.Errorf("expected empty tag on error, got %q", tag)
+	}
+	if !strings.Contains(err.Error(), "status 500") {
+		t.Errorf("expected status 500 in error, got: %v", err)
+	}
+}
+
+func TestCheckLatest_InvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "not json")
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	_, err := u.checkLatest()
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Errorf("expected parse error, got: %v", err)
+	}
+}
+
+func TestCheckLatest_InvalidTagFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+	}{
+		{"path traversal", "../../../etc/passwd"},
+		{"prerelease", "v1.2.3-beta"},
+		{"no v prefix", "1.2.3"},
+		{"extra segments", "v1.2.3.4"},
+		{"letters", "vabc"},
+		{"shell injection", "v1.0.0; rm -rf /"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]string{"tag_name": tt.tag})
+			}))
+			defer srv.Close()
+
+			u := newTestUpdater(srv, nil, "v1.0.0", "")
+			tag, err := u.checkLatest()
+			if err == nil {
+				t.Fatalf("expected error for tag %q, got tag=%q", tt.tag, tag)
+			}
+			if !strings.Contains(err.Error(), "unexpected release tag format") {
+				t.Errorf("expected format error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestVersionTagPattern(t *testing.T) {
+	valid := []string{"v0.0.1", "v1.2.3", "v10.20.30", "v0.0.0"}
+	for _, tag := range valid {
+		if !versionTagPattern.MatchString(tag) {
+			t.Errorf("expected %q to be valid", tag)
+		}
+	}
+
+	invalid := []string{
+		"", "dev", "1.2.3", "v1.2", "v1.2.3.4",
+		"v1.2.3-beta", "v1.2.3+build", "../foo",
+		"v1.2.3; rm -rf /", "v1.2.3\n", "V1.2.3",
+	}
+	for _, tag := range invalid {
+		if versionTagPattern.MatchString(tag) {
+			t.Errorf("expected %q to be invalid", tag)
+		}
+	}
+}
+
+func TestDownloadAndReplace(t *testing.T) {
+	// Create a fake "current binary" to be replaced
+	tmpDir := t.TempDir()
+	selfPath := filepath.Join(tmpDir, "claude-wrapper")
+	if err := os.WriteFile(selfPath, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	newContent := "new binary content"
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, newContent)
+	}))
+	defer dlSrv.Close()
+
+	// apiSrv unused for download, but needed for helper
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer apiSrv.Close()
+
+	u := newTestUpdater(apiSrv, dlSrv, "v1.0.0", selfPath)
+
+	if err := u.downloadAndReplace("v2.0.0"); err != nil {
+		t.Fatalf("downloadAndReplace failed: %v", err)
+	}
+
+	// Verify the binary was replaced
+	content, err := os.ReadFile(selfPath)
+	if err != nil {
+		t.Fatalf("failed to read replaced binary: %v", err)
+	}
+	if string(content) != newContent {
+		t.Errorf("expected %q, got %q", newContent, string(content))
+	}
+
+	// Verify it's executable
+	info, err := os.Stat(selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Error("replaced binary is not executable")
+	}
+}
+
+func TestDownloadAndReplace_DownloadError(t *testing.T) {
+	tmpDir := t.TempDir()
+	selfPath := filepath.Join(tmpDir, "claude-wrapper")
+	if err := os.WriteFile(selfPath, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer dlSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer apiSrv.Close()
+
+	u := newTestUpdater(apiSrv, dlSrv, "v1.0.0", selfPath)
+
+	err := u.downloadAndReplace("v2.0.0")
+	if err == nil {
+		t.Fatal("expected error for 404 download")
+	}
+	if !strings.Contains(err.Error(), "status 404") {
+		t.Errorf("expected status 404 in error, got: %v", err)
+	}
+
+	// Verify original binary is untouched
+	content, err := os.ReadFile(selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "old binary" {
+		t.Error("original binary was modified on failed download")
+	}
+}
+
+func TestDownloadAndReplace_NoTempFileLeaked(t *testing.T) {
+	tmpDir := t.TempDir()
+	selfPath := filepath.Join(tmpDir, "claude-wrapper")
+	if err := os.WriteFile(selfPath, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer dlSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer apiSrv.Close()
+
+	u := newTestUpdater(apiSrv, dlSrv, "v1.0.0", selfPath)
+	_ = u.downloadAndReplace("v2.0.0")
+
+	// Only the original binary should remain
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected only original binary in dir, found: %v", names)
+	}
+}
+
+func TestDownloadAndReplace_SelfPathError(t *testing.T) {
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer apiSrv.Close()
+
+	u := newTestUpdater(apiSrv, nil, "v1.0.0", "")
+	u.selfPath = func() (string, error) { return "", fmt.Errorf("no executable path") }
+
+	err := u.downloadAndReplace("v2.0.0")
+	if err == nil {
+		t.Fatal("expected error when selfPath fails")
+	}
+	if !strings.Contains(err.Error(), "resolve executable path") {
+		t.Errorf("expected resolve error, got: %v", err)
+	}
+}
+
+func TestApply_SkipsWhenAlreadyUpdated(t *testing.T) {
+	t.Setenv("CLAUDE_WRAPPER_UPDATED", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not make HTTP request when CLAUDE_WRAPPER_UPDATED=1")
+	}))
+	defer srv.Close()
+
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	u.apply()
+}
+
+func TestApply_NoUpdateAvailable(t *testing.T) {
+	t.Setenv("CLAUDE_WRAPPER_UPDATED", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v1.0.0"})
+	}))
+	defer srv.Close()
+
+	restarted := false
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	u.restart = func(self string) error { restarted = true; return nil }
+	u.apply()
+
+	if restarted {
+		t.Error("should not restart when no update is available")
+	}
+}
+
+func TestApply_SuccessfulUpdate(t *testing.T) {
+	t.Setenv("CLAUDE_WRAPPER_UPDATED", "")
+
+	tmpDir := t.TempDir()
+	selfPath := filepath.Join(tmpDir, "claude-wrapper")
+	if err := os.WriteFile(selfPath, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v2.0.0"})
+	}))
+	defer apiSrv.Close()
+
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "new binary")
+	}))
+	defer dlSrv.Close()
+
+	var restartedWith string
+	u := newTestUpdater(apiSrv, dlSrv, "v1.0.0", selfPath)
+	u.restart = func(self string) error { restartedWith = self; return nil }
+
+	u.apply()
+
+	if restartedWith != selfPath {
+		t.Errorf("expected restart with %q, got %q", selfPath, restartedWith)
+	}
+	if os.Getenv("CLAUDE_WRAPPER_UPDATED") != "1" {
+		t.Error("expected CLAUDE_WRAPPER_UPDATED=1 to be set before restart")
+	}
+
+	content, err := os.ReadFile(selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "new binary" {
+		t.Errorf("binary not replaced, got %q", string(content))
+	}
+}
+
+func TestApply_DownloadFails(t *testing.T) {
+	t.Setenv("CLAUDE_WRAPPER_UPDATED", "")
+
+	tmpDir := t.TempDir()
+	selfPath := filepath.Join(tmpDir, "claude-wrapper")
+	if err := os.WriteFile(selfPath, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v2.0.0"})
+	}))
+	defer apiSrv.Close()
+
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer dlSrv.Close()
+
+	restarted := false
+	u := newTestUpdater(apiSrv, dlSrv, "v1.0.0", selfPath)
+	u.restart = func(self string) error { restarted = true; return nil }
+
+	u.apply()
+
+	if restarted {
+		t.Error("should not restart when download fails")
+	}
+
+	content, err := os.ReadFile(selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "old binary" {
+		t.Error("binary should not be modified when download fails")
+	}
+}
+
+func TestApply_SelfPathFailsAfterUpdate(t *testing.T) {
+	t.Setenv("CLAUDE_WRAPPER_UPDATED", "")
+
+	tmpDir := t.TempDir()
+	selfPath := filepath.Join(tmpDir, "claude-wrapper")
+	if err := os.WriteFile(selfPath, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v2.0.0"})
+	}))
+	defer apiSrv.Close()
+
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "new binary")
+	}))
+	defer dlSrv.Close()
+
+	callCount := 0
+	restarted := false
+	u := newTestUpdater(apiSrv, dlSrv, "v1.0.0", selfPath)
+	u.selfPath = func() (string, error) {
+		callCount++
+		if callCount == 1 {
+			// First call from downloadAndReplace succeeds
+			return selfPath, nil
+		}
+		// Second call from apply after download succeeds fails
+		return "", fmt.Errorf("path gone")
+	}
+	u.restart = func(self string) error { restarted = true; return nil }
+
+	u.apply()
+
+	if restarted {
+		t.Error("should not restart when selfPath fails after update")
+	}
+	if os.Getenv("CLAUDE_WRAPPER_UPDATED") == "1" {
+		t.Error("should not set CLAUDE_WRAPPER_UPDATED when selfPath fails")
+	}
+}
+
+func TestApply_CheckLatestError(t *testing.T) {
+	t.Setenv("CLAUDE_WRAPPER_UPDATED", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	restarted := false
+	u := newTestUpdater(srv, nil, "v1.0.0", "")
+	u.restart = func(self string) error { restarted = true; return nil }
+
+	u.apply()
+
+	if restarted {
+		t.Error("should not restart when checkLatest fails")
 	}
 }

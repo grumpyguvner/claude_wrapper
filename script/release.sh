@@ -42,7 +42,7 @@ go test -race ./...
 
 # Build linux/amd64
 echo "Building ${BINARY} linux/amd64..."
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "${BINARY}" .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION}" -o "${BINARY}" .
 
 # Tag
 echo "Tagging ${VERSION}..."

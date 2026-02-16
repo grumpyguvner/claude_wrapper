@@ -16,6 +16,7 @@ A Go wrapper for the Claude CLI that provides branch-specific personal file mana
 ```
 main()
   └─ run()
+      ├─ checkForUpdate()             # Self-update (release builds only)
       ├─ loadConfig()                 # Git detection & configuration
       ├─ syncIn()                     # Storage -> Working directory
       ├─ execClaude()                 # Run actual claude command
@@ -28,7 +29,8 @@ main()
 1. **Git errors** (not in repo, detached HEAD): Pass through to claude directly
 2. **Sync errors**: Fail with clear message, claude does not run
 3. **Cleanup errors**: Log warning, do not fail the operation
-4. **Claude exit code**: Preserved via `exec.ExitError` unwrapping
+4. **Update errors**: Log warning, continue normally
+5. **Claude exit code**: Preserved via `exec.ExitError` unwrapping
 
 ### Storage Layout
 
@@ -64,12 +66,13 @@ Unit tests cover utility functions:
 - File copying (permissions, content)
 - Directory copying (recursive, structure)
 - Directory listing (including non-existent)
+- Update mechanism: version comparison, tag format validation (including attack strings), download and binary replacement, error handling, temp file cleanup
 
-The orchestration functions (`run`, `syncIn`, `syncOut`, `cleanupDeletedBranches`) are not unit tested as they depend on git state and filesystem side effects.
+The update orchestration (`updater.apply`) is unit tested via mock HTTP servers and injected dependencies. The remaining orchestration functions (`run`, `syncIn`, `syncOut`, `cleanupDeletedBranches`) are not unit tested as they depend on git state and filesystem side effects.
 
 ## Design Decisions
 
-- **Zero dependencies**: Only Go stdlib. Git is invoked via `exec.Command`.
+- **Zero dependencies**: Only Go stdlib. Git is invoked via `exec.Command`. Release builds check GitHub for updates on startup (fails gracefully if unreachable).
 - **`.git/info/exclude` as source of truth**: This is a standard git mechanism for local-only ignores. The wrapper reuses it rather than inventing a new config format.
 - **URL-encoded branch names**: Avoids filesystem issues with `/` in branch names while remaining fully reversible.
 - **7-day grace period for cleanup**: Prevents accidental data loss if a branch is temporarily deleted.

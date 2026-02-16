@@ -207,7 +207,9 @@ chmod +x claude-wrapper
 
 ### Updating
 
-To update to a newer version:
+Release installs (via `install.sh` or GitHub releases) auto-update on startup. No manual action is needed.
+
+For source builds, update manually:
 
 ```bash
 # Pull new source code
