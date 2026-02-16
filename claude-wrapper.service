@@ -1,0 +1,18 @@
+# Optional systemd service for claude-wrapper
+# This is for future enhancements (background sync, scheduled cleanup, etc.)
+# Currently the wrapper runs synchronously with claude
+
+[Unit]
+Description=Claude Wrapper Cleanup Service
+Documentation=https://github.com/yourusername/claude-wrapper
+After=network.target
+
+[Service]
+Type=oneshot
+User=%u
+ExecStart=/usr/local/bin/claude-wrapper-cleanup
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
