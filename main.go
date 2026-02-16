@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +32,10 @@ type Config struct {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
 		log.Fatalf("error: %v", err)
 	}
 }
@@ -90,7 +96,7 @@ func loadConfig() (*Config, error) {
 	if currentBranch == defaultBranch {
 		storeLocation = storeBase
 	} else {
-		storeLocation = filepath.Join(storeBase, branchesDir, currentBranch)
+		storeLocation = filepath.Join(storeBase, branchesDir, encodeBranchName(currentBranch))
 	}
 
 	return &Config{
@@ -152,6 +158,14 @@ func getAllBranches() (map[string]bool, error) {
 	return branches, scanner.Err()
 }
 
+func encodeBranchName(branch string) string {
+	return url.PathEscape(branch)
+}
+
+func decodeBranchName(encoded string) (string, error) {
+	return url.PathUnescape(encoded)
+}
+
 func syncIn(cfg *Config) error {
 	// Initialize branch storage if needed
 	if err := initializeBranchStorage(cfg); err != nil {
@@ -185,9 +199,18 @@ func syncIn(cfg *Config) error {
 }
 
 func initializeBranchStorage(cfg *Config) error {
-	// If storage already exists or we're on default branch, nothing to do
-	if _, err := os.Stat(cfg.StoreLocation); err == nil || cfg.CurrentBranch == cfg.DefaultBranch {
+	// Default branch uses storeBase directly, no initialization needed
+	if cfg.CurrentBranch == cfg.DefaultBranch {
 		return nil
+	}
+
+	// Check if storage already exists
+	_, err := os.Stat(cfg.StoreLocation)
+	if err == nil {
+		return nil // Already exists
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to check branch storage %s: %w", cfg.StoreLocation, err)
 	}
 
 	// Create new branch storage directory
@@ -300,9 +323,15 @@ func cleanupDeletedBranches(cfg *Config) error {
 			continue
 		}
 
-		branchName := entry.Name()
-		branchPath := filepath.Join(branchesPath, branchName)
+		encodedName := entry.Name()
+		branchPath := filepath.Join(branchesPath, encodedName)
 		markerPath := filepath.Join(branchPath, deletionMarker)
+
+		branchName, err := decodeBranchName(encodedName)
+		if err != nil {
+			log.Printf("warning: failed to decode branch name %s: %v", encodedName, err)
+			continue
+		}
 
 		// Skip current branch
 		if branchName == cfg.CurrentBranch {
@@ -423,12 +452,17 @@ func addToExclude(repoRoot, item string) error {
 
 	// Check if item already exists in exclude file
 	if file, err := os.Open(excludePath); err == nil {
-		defer file.Close()
 		scanner := bufio.NewScanner(file)
+		found := false
 		for scanner.Scan() {
 			if strings.TrimSpace(scanner.Text()) == item {
-				return nil // Already exists
+				found = true
+				break
 			}
+		}
+		file.Close()
+		if found {
+			return nil
 		}
 	}
 
@@ -444,9 +478,14 @@ func addToExclude(repoRoot, item string) error {
 }
 
 func copyPath(src, dst string) error {
-	srcInfo, err := os.Stat(src)
+	srcInfo, err := os.Lstat(src)
 	if err != nil {
 		return err
+	}
+
+	if srcInfo.Mode()&os.ModeSymlink != 0 {
+		log.Printf("warning: skipping symlink: %s", src)
+		return nil
 	}
 
 	if srcInfo.IsDir() {
@@ -498,6 +537,11 @@ func copyDir(src, dst string) error {
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.Type()&os.ModeSymlink != 0 {
+			log.Printf("warning: skipping symlink: %s", srcPath)
+			continue
+		}
 
 		if entry.IsDir() {
 			if err := copyDir(srcPath, dstPath); err != nil {
