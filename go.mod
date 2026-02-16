@@ -1,3 +1,3 @@
-module github.com/yourusername/claude-wrapper
+module claude-wrapper
 
 go 1.22
