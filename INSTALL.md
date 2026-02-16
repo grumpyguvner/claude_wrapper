@@ -277,10 +277,6 @@ alias claude='claude-wrapper'
 source ~/.bashrc
 ```
 
-## Advanced: Systemd Integration
-
-See `claude-wrapper.service` for optional systemd service configuration (for future background sync features).
-
 ## Support
 
 For issues:
