@@ -21,6 +21,15 @@ import (
 
 var version = "dev"
 
+var (
+	getGitRepoRootFn   = getGitRepoRoot
+	getCurrentBranchFn = getCurrentBranch
+	getDefaultBranchFn = getDefaultBranch
+	getAllBranchesFn    = getAllBranches
+	execClaudeFn       = execClaude
+	checkForUpdateFn   = checkForUpdate
+)
+
 const (
 	excludeFile      = ".git/info/exclude"
 	deletionMarker   = ".deleted_at"
@@ -198,12 +207,12 @@ func checkForUpdate() {
 }
 
 func run(args []string) error {
-	checkForUpdate()
+	checkForUpdateFn()
 
 	cfg, err := loadConfig()
 	if err != nil {
 		// Not in a git repo, just pass through to claude
-		return execClaude(args)
+		return execClaudeFn(args)
 	}
 
 	// Sync in: storage -> working directory
@@ -212,7 +221,7 @@ func run(args []string) error {
 	}
 
 	// Execute claude
-	if err := execClaude(args); err != nil {
+	if err := execClaudeFn(args); err != nil {
 		return fmt.Errorf("claude execution failed: %w", err)
 	}
 
@@ -231,17 +240,17 @@ func run(args []string) error {
 }
 
 func loadConfig() (*Config, error) {
-	repoRoot, err := getGitRepoRoot()
+	repoRoot, err := getGitRepoRootFn()
 	if err != nil {
 		return nil, err
 	}
 
-	currentBranch, err := getCurrentBranch()
+	currentBranch, err := getCurrentBranchFn()
 	if err != nil {
 		return nil, err
 	}
 
-	defaultBranch := getDefaultBranch()
+	defaultBranch := getDefaultBranchFn()
 	repoName := filepath.Base(repoRoot)
 	
 	homeDir, err := os.UserHomeDir()
@@ -463,7 +472,7 @@ func cleanupDeletedBranches(cfg *Config) error {
 	}
 
 	// Get all current git branches
-	gitBranches, err := getAllBranches()
+	gitBranches, err := getAllBranchesFn()
 	if err != nil {
 		return err
 	}

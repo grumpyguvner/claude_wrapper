@@ -7,7 +7,7 @@ A Go wrapper for the Claude CLI that provides branch-specific personal file mana
 ## Core Files
 
 - **main.go** - Implementation, zero external dependencies
-- **main_test.go** - Unit tests for utility functions
+- **main_test.go** - Unit tests for utility functions and core business logic
 - **go.mod** - Go module definition (Go 1.22+)
 - **Makefile** - Build, test, install automation
 
@@ -68,7 +68,13 @@ Unit tests cover utility functions:
 - Directory listing (including non-existent)
 - Update mechanism: version comparison, tag format validation (including attack strings), download and binary replacement, error handling, temp file cleanup
 
-The update orchestration (`updater.apply`) is unit tested via mock HTTP servers and injected dependencies. The remaining orchestration functions (`run`, `syncIn`, `syncOut`, `cleanupDeletedBranches`) are not unit tested as they depend on git state and filesystem side effects.
+Core business logic is tested via package-level function variables that stub git and claude dependencies:
+- `initializeBranchStorage`: default branch no-op, copy from default store, no default store, existing storage
+- `syncIn`: file copying and exclude updates, empty storage, special item filtering, branch initialization
+- `syncOut`: copying to storage, removal of de-listed files, special item preservation, missing files
+- `cleanupDeletedBranches`: missing branches dir, active branch retention, marker creation/expiry/corruption, current branch skip, git error propagation
+- `loadConfig`: default vs feature branch paths, git/branch/home errors
+- `run`: pass-through outside git, full sync-in/claude/sync-out flow, syncIn/syncOut/claude error propagation
 
 ## Design Decisions
 
