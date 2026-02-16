@@ -57,7 +57,7 @@ func TestFilterItems(t *testing.T) {
 
 func TestReadExcludeFile(t *testing.T) {
 	tempDir := t.TempDir()
-	
+
 	// Create a test repository structure
 	gitInfoDir := filepath.Join(tempDir, ".git", "info")
 	if err := os.MkdirAll(gitInfoDir, 0755); err != nil {

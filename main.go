@@ -10,59 +10,59 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 const (
-	excludeFile      = ".git/info/exclude"
-	deletionMarker   = ".deleted_at"
-	branchesDir      = "branches"
+	excludeFile       = ".git/info/exclude"
+	deletionMarker    = ".deleted_at"
+	branchesDir       = "branches"
 	deletionGraceDays = 7
 )
 
 type Config struct {
-	RepoRoot       string
-	CurrentBranch  string
-	DefaultBranch  string
-	StoreBase      string
-	StoreLocation  string
+	RepoRoot      string
+	CurrentBranch string
+	DefaultBranch string
+	StoreBase     string
+	StoreLocation string
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	exitCode, err := run(os.Args[1:])
+	if err != nil {
 		log.Fatalf("error: %v", err)
 	}
+	os.Exit(exitCode)
 }
 
-func run(args []string) error {
+func run(args []string) (int, error) {
 	cfg, err := loadConfig()
 	if err != nil {
-		// Not in a git repo, just pass through to claude
-		return execClaude(args)
+		// Not in a git repo, just exec claude directly (replaces process)
+		return 0, execClaude(args)
 	}
 
 	// Sync in: storage -> working directory
 	if err := syncIn(cfg); err != nil {
-		return fmt.Errorf("sync in failed: %w", err)
+		return 0, fmt.Errorf("sync in failed: %w", err)
 	}
 
-	// Execute claude
-	if err := execClaude(args); err != nil {
-		return fmt.Errorf("claude execution failed: %w", err)
-	}
+	// Execute claude and capture exit code
+	claudeExit := runClaude(args)
 
-	// Sync out: working directory -> storage
+	// Sync out: always run regardless of claude's exit code
 	if err := syncOut(cfg); err != nil {
-		return fmt.Errorf("sync out failed: %w", err)
+		return claudeExit, fmt.Errorf("sync out failed: %w", err)
 	}
 
 	// Cleanup old branches
 	if err := cleanupDeletedBranches(cfg); err != nil {
-		// Log but don't fail on cleanup errors
 		log.Printf("warning: cleanup failed: %v", err)
 	}
 
-	return nil
+	return claudeExit, nil
 }
 
 func loadConfig() (*Config, error) {
@@ -78,14 +78,14 @@ func loadConfig() (*Config, error) {
 
 	defaultBranch := getDefaultBranch()
 	repoName := filepath.Base(repoRoot)
-	
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
 	storeBase := filepath.Join(homeDir, ".workspaces", repoName)
-	
+
 	var storeLocation string
 	if currentBranch == defaultBranch {
 		storeLocation = storeBase
@@ -140,7 +140,7 @@ func getAllBranches() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	branches := make(map[string]bool)
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	for scanner.Scan() {
@@ -274,7 +274,7 @@ func syncOut(cfg *Config) error {
 
 func cleanupDeletedBranches(cfg *Config) error {
 	branchesPath := filepath.Join(cfg.StoreBase, branchesDir)
-	
+
 	// Check if branches directory exists
 	if _, err := os.Stat(branchesPath); os.IsNotExist(err) {
 		return nil
@@ -320,7 +320,7 @@ func cleanupDeletedBranches(cfg *Config) error {
 		markerExists := false
 		if data, err := os.ReadFile(markerPath); err == nil {
 			markerExists = true
-			
+
 			// Check age of marker
 			timestamp, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 			if err == nil {
@@ -375,7 +375,7 @@ func filterItems(items []string) []string {
 
 func readExcludeFile(repoRoot string) ([]string, error) {
 	excludePath := filepath.Join(repoRoot, excludeFile)
-	
+
 	file, err := os.Open(excludePath)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -389,7 +389,7 @@ func readExcludeFile(repoRoot string) ([]string, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -415,7 +415,7 @@ func readExcludeFile(repoRoot string) ([]string, error) {
 
 func addToExclude(repoRoot, item string) error {
 	excludePath := filepath.Join(repoRoot, excludeFile)
-	
+
 	// Ensure .git/info directory exists
 	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
 		return err
@@ -513,10 +513,26 @@ func copyDir(src, dst string) error {
 	return nil
 }
 
+// execClaude replaces the current process with claude (used for non-git pass-through).
 func execClaude(args []string) error {
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		return fmt.Errorf("claude not found: %w", err)
+	}
+	return syscall.Exec(claudePath, append([]string{"claude"}, args...), os.Environ())
+}
+
+// runClaude runs claude as a subprocess and returns its exit code.
+func runClaude(args []string) int {
 	cmd := exec.Command("claude", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 1
+	}
+	return 0
 }
