@@ -134,6 +134,9 @@ func getDefaultBranch() string {
 	return strings.TrimPrefix(ref, "refs/remotes/origin/")
 }
 
+// getAllBranchesFunc is the function used to get git branches. Replaced in tests.
+var getAllBranchesFunc = getAllBranches
+
 func getAllBranches() (map[string]bool, error) {
 	cmd := exec.Command("git", "branch", "--format=%(refname:short)")
 	output, err := cmd.Output()
@@ -281,7 +284,7 @@ func cleanupDeletedBranches(cfg *Config) error {
 	}
 
 	// Get all current git branches
-	gitBranches, err := getAllBranches()
+	gitBranches, err := getAllBranchesFunc()
 	if err != nil {
 		return err
 	}
