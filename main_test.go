@@ -234,6 +234,36 @@ func TestCopyDir(t *testing.T) {
 	}
 }
 
+func TestEncodeBranchName(t *testing.T) {
+	tests := []struct {
+		input   string
+		encoded string
+	}{
+		{"main", "main"},
+		{"feature/login", "feature%2Flogin"},
+		{"feature/auth/oauth", "feature%2Fauth%2Foauth"},
+		{"simple-branch", "simple-branch"},
+		{"branch--with--dashes", "branch--with--dashes"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			encoded := encodeBranchName(tt.input)
+			if encoded != tt.encoded {
+				t.Errorf("encodeBranchName(%q) = %q, want %q", tt.input, encoded, tt.encoded)
+			}
+
+			decoded, err := decodeBranchName(encoded)
+			if err != nil {
+				t.Fatalf("decodeBranchName(%q) error: %v", encoded, err)
+			}
+			if decoded != tt.input {
+				t.Errorf("decodeBranchName(%q) = %q, want %q", encoded, decoded, tt.input)
+			}
+		})
+	}
+}
+
 func TestListDir(t *testing.T) {
 	tempDir := t.TempDir()
 
