@@ -1,4 +1,4 @@
-.PHONY: build test install clean
+.PHONY: build test install clean release
 
 BINARY_NAME=claude-wrapper
 INSTALL_PATH=/usr/local/bin
@@ -22,3 +22,6 @@ lint:
 
 run: build
 	./$(BINARY_NAME)
+
+release:
+	@script/release.sh $(VERSION)
