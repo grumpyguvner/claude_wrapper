@@ -62,7 +62,8 @@ case "$REPLY" in
         gh release create "$NEW_TAG" \
             --title "$NEW_TAG" \
             --generate-notes \
-            dist/claude-wrapper-linux-amd64
+            dist/claude-wrapper-linux-amd64 \
+            scripts/install.sh
 
         echo -e "${GREEN}Production release $NEW_TAG created!${NC}"
         ;;

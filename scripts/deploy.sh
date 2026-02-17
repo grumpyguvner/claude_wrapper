@@ -63,7 +63,8 @@ case "$REPLY" in
             --title "$NEW_TAG" \
             --generate-notes \
             --prerelease \
-            dist/claude-wrapper-linux-amd64
+            dist/claude-wrapper-linux-amd64 \
+            scripts/install.sh
 
         echo -e "${GREEN}Pre-release $NEW_TAG created!${NC}"
         ;;

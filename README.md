@@ -53,6 +53,14 @@ make lint
 
 ## Installation
 
+### Quick Install
+
+```bash
+curl -fsSL https://github.com/grumpyguvner/claude_wrapper/releases/latest/download/install.sh | bash
+```
+
+This downloads the latest release to `~/.local/bin/claude-wrapper` and adds `alias claude='claude-wrapper'` to your shell config. Restart your shell or `source ~/.bashrc` to activate.
+
 ### Option 1: Install to /usr/local/bin
 
 ```bash
