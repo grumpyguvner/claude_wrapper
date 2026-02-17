@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
 const (
 	excludeFile       = ".git/info/exclude"
 	deletionMarker    = ".deleted_at"
