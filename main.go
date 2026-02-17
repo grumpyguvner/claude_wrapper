@@ -461,6 +461,9 @@ func addToExclude(repoRoot, item string) error {
 			}
 		}
 		readFile.Close()
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("failed to read exclude file: %w", err)
+		}
 		if found {
 			return nil
 		}
