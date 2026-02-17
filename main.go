@@ -34,6 +34,21 @@ type Config struct {
 	StoreLocation string
 }
 
+// sanitizeBranchName percent-encodes characters that would create nested
+// directories or are otherwise unsafe in filesystem paths.
+func sanitizeBranchName(branch string) string {
+	branch = strings.ReplaceAll(branch, "%", "%25")
+	branch = strings.ReplaceAll(branch, "/", "%2F")
+	return branch
+}
+
+// unsanitizeBranchName reverses sanitizeBranchName.
+func unsanitizeBranchName(name string) string {
+	name = strings.ReplaceAll(name, "%2F", "/")
+	name = strings.ReplaceAll(name, "%25", "%")
+	return name
+}
+
 func main() {
 	exitCode, err := run(os.Args[1:])
 	if err != nil {
@@ -95,7 +110,7 @@ func loadConfig() (*Config, error) {
 	if currentBranch == defaultBranch {
 		storeLocation = storeBase
 	} else {
-		storeLocation = filepath.Join(storeBase, branchesDir, currentBranch)
+		storeLocation = filepath.Join(storeBase, branchesDir, sanitizeBranchName(currentBranch))
 	}
 
 	return &Config{
@@ -193,8 +208,13 @@ func syncIn(cfg *Config) error {
 }
 
 func initializeBranchStorage(cfg *Config) error {
-	// If storage already exists or we're on default branch, nothing to do
-	if _, err := os.Stat(cfg.StoreLocation); err == nil || cfg.CurrentBranch == cfg.DefaultBranch {
+	// Nothing to do on default branch
+	if cfg.CurrentBranch == cfg.DefaultBranch {
+		return nil
+	}
+
+	// Nothing to do if storage already exists
+	if _, err := os.Stat(cfg.StoreLocation); err == nil {
 		return nil
 	}
 
@@ -308,8 +328,9 @@ func cleanupDeletedBranches(cfg *Config) error {
 			continue
 		}
 
-		branchName := entry.Name()
-		branchPath := filepath.Join(branchesPath, branchName)
+		dirName := entry.Name()
+		branchName := unsanitizeBranchName(dirName)
+		branchPath := filepath.Join(branchesPath, dirName)
 		markerPath := filepath.Join(branchPath, deletionMarker)
 
 		// Skip current branch
@@ -430,13 +451,18 @@ func addToExclude(repoRoot, item string) error {
 	}
 
 	// Check if item already exists in exclude file
-	if file, err := os.Open(excludePath); err == nil {
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
+	if readFile, err := os.Open(excludePath); err == nil {
+		scanner := bufio.NewScanner(readFile)
+		found := false
 		for scanner.Scan() {
 			if strings.TrimSpace(scanner.Text()) == item {
-				return nil // Already exists
+				found = true
+				break
 			}
+		}
+		readFile.Close()
+		if found {
+			return nil
 		}
 	}
 

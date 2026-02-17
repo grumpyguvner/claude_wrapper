@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,9 +273,9 @@ func TestScenario_BranchNamesWithSlashesWorkCorrectly(t *testing.T) {
 	t.Run("Given the user is on a branch with slashes in the name", func(t *testing.T) {
 		repoRoot := givenRepo(t)
 		storeBase := t.TempDir()
-		// Branch "feature/auth/oauth" should create nested path
+		// Branch "feature/auth/oauth" should be sanitized to a flat directory name
 		branchName := "feature/auth/oauth"
-		storeLocation := filepath.Join(storeBase, branchesDir, branchName)
+		storeLocation := filepath.Join(storeBase, branchesDir, sanitizeBranchName(branchName))
 
 		cfg := &Config{
 			RepoRoot:      repoRoot,
@@ -292,13 +293,148 @@ func TestScenario_BranchNamesWithSlashesWorkCorrectly(t *testing.T) {
 				t.Fatalf("syncIn failed: %v", err)
 			}
 
-			t.Run("Then the nested branch storage path is created correctly", func(t *testing.T) {
+			t.Run("Then storage uses a flat sanitized directory name not nested dirs", func(t *testing.T) {
 				assertExists(t, storeLocation)
+				// The directory name should be "feature%2Fauth%2Foauth", not nested "feature/auth/oauth"
+				sanitized := sanitizeBranchName(branchName)
+				expectedDir := filepath.Join(storeBase, branchesDir, sanitized)
+				if storeLocation != expectedDir {
+					t.Errorf("expected store at %s, got %s", expectedDir, storeLocation)
+				}
 				assertFileContent(t, filepath.Join(storeLocation, "CLAUDE.md"), "default config")
 			})
 
 			t.Run("Then the file appears in the working directory", func(t *testing.T) {
 				assertFileContent(t, filepath.Join(repoRoot, "CLAUDE.md"), "default config")
+			})
+		})
+	})
+}
+
+// --- Scenario: Sanitize/Unsanitize Branch Names Are Reversible ---
+
+func TestScenario_BranchNameSanitizationIsReversible(t *testing.T) {
+	t.Run("Given branch names with various special characters", func(t *testing.T) {
+		cases := []string{
+			"main",
+			"feature/auth",
+			"feature/auth/oauth",
+			"fix/issue-42",
+			"user/name/topic",
+			"branch-with-percent%sign",
+			"release/v1.0",
+			"literal%2Fin-name",
+			"tricky%25encoded",
+			"both%2Fand/slash",
+		}
+
+		t.Run("When sanitized and then unsanitized", func(t *testing.T) {
+			for _, branch := range cases {
+				t.Run(branch, func(t *testing.T) {
+					sanitized := sanitizeBranchName(branch)
+
+					t.Run("Then the sanitized name contains no path separators", func(t *testing.T) {
+						if strings.Contains(sanitized, "/") {
+							t.Errorf("sanitized name %q still contains /", sanitized)
+						}
+					})
+
+					t.Run("Then unsanitizing recovers the original name", func(t *testing.T) {
+						recovered := unsanitizeBranchName(sanitized)
+						if recovered != branch {
+							t.Errorf("expected %q, got %q", branch, recovered)
+						}
+					})
+				})
+			}
+		})
+	})
+}
+
+// --- Scenario: Cleanup Works For Slashed Branch Names ---
+
+func TestScenario_CleanupHandlesSlashedBranchNames(t *testing.T) {
+	t.Run("Given a deleted branch with slashes whose storage uses sanitized dir names", func(t *testing.T) {
+		repoRoot := givenRepo(t)
+		cfg, storeBase := givenConfig(t, repoRoot, configOpts{})
+		branchesPath := filepath.Join(storeBase, branchesDir)
+
+		// Storage for "feature/auth" uses sanitized name "feature%2Fauth"
+		sanitizedName := sanitizeBranchName("feature/auth")
+		writeFile(t, filepath.Join(branchesPath, sanitizedName, "CLAUDE.md"), "auth config")
+
+		// "feature/auth" no longer exists in git
+		withBranches(t, map[string]bool{"main": true})
+
+		t.Run("When the wrapper runs cleanup", func(t *testing.T) {
+			if err := cleanupDeletedBranches(cfg); err != nil {
+				t.Fatalf("cleanup failed: %v", err)
+			}
+
+			t.Run("Then a deletion marker is created for the sanitized directory", func(t *testing.T) {
+				assertExists(t, filepath.Join(branchesPath, sanitizedName, deletionMarker))
+			})
+
+			t.Run("Then the branch files are preserved during grace period", func(t *testing.T) {
+				assertExists(t, filepath.Join(branchesPath, sanitizedName, "CLAUDE.md"))
+			})
+		})
+	})
+}
+
+func TestScenario_CleanupPreservesSlashedBranchThatExistsInGit(t *testing.T) {
+	t.Run("Given a branch with slashes that still exists in git", func(t *testing.T) {
+		repoRoot := givenRepo(t)
+		cfg, storeBase := givenConfig(t, repoRoot, configOpts{})
+		branchesPath := filepath.Join(storeBase, branchesDir)
+
+		sanitizedName := sanitizeBranchName("feature/auth")
+		writeFile(t, filepath.Join(branchesPath, sanitizedName, "CLAUDE.md"), "auth config")
+
+		// "feature/auth" exists in git — cleanup should leave it alone
+		withBranches(t, map[string]bool{"main": true, "feature/auth": true})
+
+		t.Run("When the wrapper runs cleanup", func(t *testing.T) {
+			if err := cleanupDeletedBranches(cfg); err != nil {
+				t.Fatalf("cleanup failed: %v", err)
+			}
+
+			t.Run("Then the branch storage is untouched with no marker", func(t *testing.T) {
+				assertFileContent(t, filepath.Join(branchesPath, sanitizedName, "CLAUDE.md"), "auth config")
+				assertNotExists(t, filepath.Join(branchesPath, sanitizedName, deletionMarker))
+			})
+		})
+	})
+}
+
+func TestScenario_CleanupSkipsCurrentSlashedBranch(t *testing.T) {
+	t.Run("Given the user is on a slashed branch not in git output", func(t *testing.T) {
+		repoRoot := givenRepo(t)
+		storeBase := t.TempDir()
+		branchesPath := filepath.Join(storeBase, branchesDir)
+
+		branchName := "feature/wip"
+		sanitizedName := sanitizeBranchName(branchName)
+		writeFile(t, filepath.Join(branchesPath, sanitizedName, "CLAUDE.md"), "wip config")
+
+		withBranches(t, map[string]bool{"main": true})
+
+		cfg := &Config{
+			RepoRoot:      repoRoot,
+			CurrentBranch: branchName,
+			DefaultBranch: "main",
+			StoreBase:     storeBase,
+			StoreLocation: filepath.Join(branchesPath, sanitizedName),
+		}
+
+		t.Run("When the wrapper runs cleanup", func(t *testing.T) {
+			if err := cleanupDeletedBranches(cfg); err != nil {
+				t.Fatalf("cleanup failed: %v", err)
+			}
+
+			t.Run("Then the current branch storage is not touched", func(t *testing.T) {
+				assertExists(t, filepath.Join(branchesPath, sanitizedName, "CLAUDE.md"))
+				assertNotExists(t, filepath.Join(branchesPath, sanitizedName, deletionMarker))
 			})
 		})
 	})

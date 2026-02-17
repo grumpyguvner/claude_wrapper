@@ -35,7 +35,7 @@ func givenConfig(t *testing.T, repoRoot string, opts configOpts) (*Config, strin
 	if opts.currentBranch == opts.defaultBranch {
 		storeLocation = storeBase
 	} else {
-		storeLocation = filepath.Join(storeBase, branchesDir, opts.currentBranch)
+		storeLocation = filepath.Join(storeBase, branchesDir, sanitizeBranchName(opts.currentBranch))
 	}
 
 	cfg := &Config{
